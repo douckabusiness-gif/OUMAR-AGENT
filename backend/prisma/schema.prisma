@@ -1,0 +1,353 @@
+// OmniDesk - Database Schema
+// Multi-channel communication system with unified conversations
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// CONFIGURATION ORGANISATION (1 par installation)
+// ============================================================================
+
+model Organization {
+  id              String   @id @default(cuid())
+  name            String
+  logo            String?
+  primaryColor    String   @default("#6366f1")
+  defaultLanguage String   @default("fr")
+  timezone        String   @default("Africa/Abidjan")
+  licenseKey      String   @unique
+  licenseStatus   LicenseStatus @default(ACTIVE)
+  licenseExpiry   DateTime?
+  createdAt       DateTime @default(now())
+  users           User[]
+  channels        Channel[]
+  contacts        Contact[]
+  conversations   Conversation[]
+  automations     Automation[]
+  aiConfig        AIConfig?
+}
+
+enum LicenseStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  PENDING
+}
+
+// ============================================================================
+// UTILISATEURS (admin + agents)
+// ============================================================================
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  password       String   // bcrypt
+  firstName      String
+  lastName       String
+  avatar         String?
+  role           Role
+  customRole     CustomRole? @relation(fields:[customRoleId], references:[id])
+  customRoleId   String?
+  language       String   @default("fr")
+  status         AgentStatus @default(OFFLINE)
+  isActive       Boolean  @default(true)
+  lastSeen       DateTime?
+  organizationId String
+  organization   Organization @relation(fields:[organizationId], references:[id])
+  createdAt      DateTime @default(now())
+  assignedConversations Conversation[]
+  messages       Message[]
+  auditLogs      AuditLog[]
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+}
+
+enum AgentStatus {
+  ONLINE
+  BUSY
+  AWAY
+  OFFLINE
+}
+
+// ============================================================================
+// RÔLES PERSONNALISÉS DÉFINIS PAR L'ADMIN
+// ============================================================================
+
+model CustomRole {
+  id          String   @id @default(cuid())
+  name        String
+  permissions Json     // { canReply, canTransfer, canClose, canViewReports, canConfigureChannels, channels: [...] }
+  users       User[]
+  organizationId String
+  organization Organization @relation(fields:[organizationId], references:[id])
+
+  @@index([organizationId])
+}
+
+// ============================================================================
+// CANAUX DE COMMUNICATION
+// ============================================================================
+
+model Channel {
+  id             String      @id @default(cuid())
+  type           ChannelType
+  name           String
+  config         Json        // Credentials, webhook URLs, etc.
+  status         ChannelStatus @default(DISCONNECTED)
+  isActive       Boolean     @default(true)
+  organizationId String
+  organization   Organization @relation(fields:[organizationId], references:[id])
+  conversations  Conversation[]
+  createdAt      DateTime    @default(now())
+
+  @@index([organizationId])
+  @@index([type])
+}
+
+enum ChannelType {
+  EMAIL
+  WHATSAPP_BAILEYS
+  WHATSAPP_CLOUD
+}
+
+enum ChannelStatus {
+  CONNECTED
+  DISCONNECTED
+  CONNECTING
+  ERROR
+}
+
+// ============================================================================
+// CONTACTS (CRM)
+// ============================================================================
+
+model Contact {
+  id             String   @id @default(cuid())
+  firstName      String?
+  lastName       String?
+  phone          String?
+  email          String?
+  avatar         String?
+  language       String?  // Langue détectée automatiquement
+  tags           String[] // Array de tags
+  notes          String?
+  customFields   Json?
+  organizationId String
+  organization   Organization @relation(fields:[organizationId], references:[id])
+  conversations  Conversation[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([phone])
+  @@index([email])
+}
+
+// ============================================================================
+// CONVERSATIONS (UNIFIÉES TOUS CANAUX)
+// ============================================================================
+
+model Conversation {
+  id             String             @id @default(cuid())
+  status         ConversationStatus @default(OPEN)
+  channel        Channel            @relation(fields:[channelId], references:[id])
+  channelId      String
+  contact        Contact            @relation(fields:[contactId], references:[id])
+  contactId      String
+  assignedTo     User?              @relation(fields:[assignedToId], references:[id])
+  assignedToId   String?
+  organizationId String
+  organization   Organization       @relation(fields:[organizationId], references:[id])
+  subject        String?            // Pour les emails
+  unreadCount    Int                @default(0)
+  lastMessageAt  DateTime?
+  aiSummary      String?            // Résumé IA de la conversation
+  tags           String[]
+  messages       Message[]
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([channelId])
+  @@index([contactId])
+  @@index([assignedToId])
+  @@index([organizationId])
+  @@index([status])
+  @@index([lastMessageAt])
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  SPAM
+}
+
+// ============================================================================
+// MESSAGES (TOUS TYPES, TOUS CANAUX)
+// ============================================================================
+
+model Message {
+  id               String      @id @default(cuid())
+  conversationId   String
+  conversation     Conversation @relation(fields:[conversationId], references:[id])
+  direction        Direction
+  type             MessageType
+  content          String?     // Texte du message
+  caption          String?     // Légende pour médias
+  mediaUrl         String?     // URL fichier stocké
+  mediaType        String?     // MIME type
+  mediaSize        Int?        // Taille en bytes
+  mediaName        String?     // Nom original du fichier
+  mediaDuration    Int?        // Durée en secondes (audio/vidéo)
+  mediaThumbnail   String?     // Miniature vidéo
+  externalId       String?     // ID du message chez WA/Email
+  replyToId        String?     // Message auquel on répond
+  replyTo          Message?    @relation("Replies", fields:[replyToId], references:[id])
+  replies          Message[]   @relation("Replies")
+  status           MessageStatus @default(SENT)
+  readAt           DateTime?
+  deliveredAt      DateTime?
+  sentBy           User?       @relation(fields:[sentById], references:[id])
+  sentById         String?
+  isAiGenerated    Boolean     @default(false)
+  isInternal       Boolean     @default(false) // Note interne agent
+  language         String?     // Langue détectée
+  createdAt        DateTime    @default(now())
+
+  @@index([conversationId])
+  @@index([createdAt])
+  @@index([direction])
+  @@index([type])
+}
+
+enum Direction {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  STICKER
+  LOCATION
+  CONTACT_CARD
+  TEMPLATE
+  INTERACTIVE
+  SYSTEM
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// ============================================================================
+// CONFIGURATION IA
+// ============================================================================
+
+model AIConfig {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  organization   Organization @relation(fields:[organizationId], references:[id])
+  provider       AIProvider @default(ANTHROPIC)
+  model          String   @default("claude-sonnet-4-20250514")
+  apiKey         String   // Chiffré en base
+  temperature    Float    @default(0.7)
+  maxTokens      Int      @default(1000)
+  systemPrompt   String?  // Prompt système global
+  autoReply      Boolean  @default(false)
+  autoReplyHours Json?    // Heures de réponse auto
+  fallbackProvider AIProvider?
+  fallbackApiKey String?
+  channelPrompts Json?    // Prompts par canal
+  rolePrompts    Json?    // Prompts par rôle agent
+  updatedAt      DateTime @updatedAt
+}
+
+enum AIProvider {
+  ANTHROPIC
+  OPENAI
+  GEMINI
+  GROQ
+  MISTRAL
+  OLLAMA
+}
+
+// ============================================================================
+// AUTOMATISATIONS
+// ============================================================================
+
+model Automation {
+  id             String   @id @default(cuid())
+  name           String
+  isActive       Boolean  @default(true)
+  trigger        Json     // { event, conditions }
+  actions        Json     // [ { type, params } ]
+  organizationId String
+  organization   Organization @relation(fields:[organizationId], references:[id])
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([isActive])
+}
+
+// ============================================================================
+// LOGS D'AUDIT
+// ============================================================================
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields:[userId], references:[id])
+  action     String
+  entity     String
+  entityId   String
+  details    Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([action])
+}
+
+// ============================================================================
+// CLÉS DE LICENCE
+// ============================================================================
+
+model License {
+  id          String        @id @default(cuid())
+  key         String        @unique
+  plan        LicensePlan
+  status      LicenseStatus @default(ACTIVE)
+  maxAgents   Int           @default(5)
+  expiresAt   DateTime?
+  activatedAt DateTime?
+  domain      String?
+  createdAt   DateTime      @default(now())
+}
+
+enum LicensePlan {
+  STARTER
+  PRO
+  AGENCY
+}

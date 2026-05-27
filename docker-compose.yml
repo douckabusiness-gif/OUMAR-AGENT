@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  # Backend API Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://omnidesk:${POSTGRES_PASSWORD}@postgres:5432/omnidesk?schema=public
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - STORAGE_PATH=/app/storage
+      - PORT=3000
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173}
+    volumes:
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - omnidesk-network
+
+  # Frontend Web App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - VITE_API_URL=http://localhost:3000/api
+      - VITE_WS_URL=ws://localhost:3000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - omnidesk-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: omnidesk
+      POSTGRES_USER: omnidesk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omnidesk -d omnidesk"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - omnidesk-network
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - omnidesk-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  omnidesk-network:
+    driver: bridge
